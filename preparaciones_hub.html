@@ -77,6 +77,20 @@
 // API base relativa: usa location.origin del host que sirve el HTML.
 // Funciona en local (localhost:3001) y en PRO (vía VPN/IP corporativa).
 const API = ((location.origin && location.origin !== 'null') ? location.origin : '') + '/api';
+
+// Inyectar token del portal en todas las llamadas a /api/
+(function () {
+  const _fetch = window.fetch;
+  window.fetch = function (url, opts) {
+    const token = sessionStorage.getItem('appToken');
+    if (token && typeof url === 'string' && url.includes('/api/')) {
+      opts = Object.assign({}, opts);
+      opts.headers = Object.assign({ Authorization: 'Bearer ' + token }, opts.headers || {});
+    }
+    return _fetch.call(this, url, opts);
+  };
+})();
+
 let lastDetalle = [];
 let lastAgrup = [];
 let currentBy = 'OPERARIO,NOMBRE';
