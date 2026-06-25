@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Eficiencia de Preparaciones</title>
+<link rel="stylesheet" href="corporate-style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <img class="brand-logo" src="img/logo.png" alt="Logo">
+    <div class="brand-text-stack">
+      <div class="brand-text-main">REPORTING · PRODUCCIÓN</div>
+      <div class="brand-text-app">Eficiencia de Preparaciones</div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="status" id="status"><span class="dot"></span><span id="statusTxt">Conectando...</span></div>
+  </div>
+</header>
+
+<div class="filters">
+  <div class="f"><label>Centro</label><select id="fCentro" multiple size="1"></select></div>
+  <div class="f"><label>Sección</label><select id="fSeccion" multiple size="1"></select></div>
+  <div class="f"><label>Puesto</label><select id="fPuesto" multiple size="1"></select></div>
+  <div class="f"><label>Turno</label><select id="fTurno" multiple size="1"></select></div>
+  <div class="f"><label>Mes</label><select id="fMes" multiple size="1"></select></div>
+  <div class="f"><label>Semana</label><select id="fSemana" multiple size="1"></select></div>
+  <div class="f"><label>Fecha desde (YYYYMMDD)</label><input id="fDesde" placeholder="20260101"></div>
+  <div class="f"><label>Fecha hasta (YYYYMMDD)</label><input id="fHasta" placeholder="20261231"></div>
+  <div class="f"><label>Material (contiene)</label><input id="fMat" placeholder="ej. 206535"></div>
+  <div class="f"><label>Operario</label><input id="fOper" placeholder="ej. 11000976"></div>
+  <div class="f"><label>OF</label><input id="fOf" placeholder="nº OF"></div>
+  <div class="f"><label>Límite filas</label><input id="fLimit" placeholder="20000" type="number"></div>
+  <div class="btn-row">
+    <button class="btn btn-secondary" onclick="clearFilters()">Limpiar</button>
+    <button class="btn" onclick="load()">Aplicar filtros</button>
+  </div>
+</div>
+
+<div class="kpis" id="kpis"></div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="agrupado">Por dimensión</div>
+  <div class="tab" data-tab="detalle">Detalle</div>
+</div>
+
+<div class="section">
+
+  <div id="panel-agrupado">
+    <div class="chips" id="groupBy">
+      <span class="chip active" data-by="OPERARIO,NOMBRE">Operario</span>
+      <span class="chip" data-by="CENTRO">Centro</span>
+      <span class="chip" data-by="SECCION">Sección</span>
+      <span class="chip" data-by="PUESTO">Puesto</span>
+      <span class="chip" data-by="MATERIAL">Material</span>
+      <span class="chip" data-by="TURNO">Turno</span>
+      <span class="chip" data-by="SEMANA">Semana</span>
+      <span class="chip" data-by="MES">Mes</span>
+      <span class="chip" data-by="FECHA">Fecha</span>
+    </div>
+    <div class="info" id="info-agrup"></div>
+    <div class="table-wrap"><table class="data" id="tblAgrup"></table></div>
+  </div>
+
+  <div id="panel-detalle" style="display:none">
+    <div class="info" id="info-det"></div>
+    <div class="table-wrap"><table class="data" id="tblDet"></table></div>
+  </div>
+
+</div>
+
+<div class="footer">Reporting interno · Datos OLAPS_MZ.dbo.NOTIFICACIONES_OFS</div>
+
+<script>
+// API base relativa: usa location.origin del host que sirve el HTML.
+// Funciona en local (localhost:3001) y en PRO (vía VPN/IP corporativa).
+const API = ((location.origin && location.origin !== 'null') ? location.origin : '') + '/api';
+let lastDetalle = [];
+let lastAgrup = [];
+let currentBy = 'OPERARIO,NOMBRE';
+let sortState = { agrup: { col:'registros', dir:-1 }, det: { col:'FECHA', dir:-1 } };
+
+const $ = s => document.querySelector(s);
+const fmt = (n, d=1) => n==null||isNaN(n) ? '-' : Number(n).toLocaleString('es-ES',{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtInt = n => n==null||isNaN(n) ? '-' : Number(n).toLocaleString('es-ES');
+const pctClass = p => p==null ? '' : p>=100 ? 'pct-good' : p>=80 ? 'pct-warn' : 'pct-bad';
+
+// ─── Centro 2020 (Silao, Guanajuato, MX) ────────────────────────────────
+// SAP graba con hora del servidor (Europa CET/CEST). En MX-Centro es UTC-6
+// fijo (sin DST desde 2022). Aplicamos offset al display:
+//   Europa CEST (abr-oct, UTC+2) → -8h respecto a Silao
+//   Europa CET  (nov-mar, UTC+1) → -7h respecto a Silao
+function shiftEuToMx(fechaStr, horaStr) {
+  if (!fechaStr || String(fechaStr).length < 8) return { fecha: fechaStr, hora: horaStr };
+  const f = String(fechaStr);
+  const y = parseInt(f.slice(0,4));
+  const m = parseInt(f.slice(4,6));
+  const d = parseInt(f.slice(6,8));
+  const h6 = String(horaStr || '000000').padStart(6, '0');
+  const hh = parseInt(h6.slice(0,2)) || 0;
+  const mi = parseInt(h6.slice(2,4)) || 0;
+  const ss = parseInt(h6.slice(4,6)) || 0;
+  // DST aproximado: abril–octubre = CEST → -8; resto = CET → -7
+  const isCEST = m >= 4 && m <= 10;
+  const offset = isCEST ? -8 : -7;
+  const dt = new Date(y, m-1, d, hh + offset, mi, ss);
+  const pad = n => String(n).padStart(2,'0');
+  return {
+    fecha: `${dt.getFullYear()}${pad(dt.getMonth()+1)}${pad(dt.getDate())}`,
+    hora:  `${pad(dt.getHours())}${pad(dt.getMinutes())}${pad(dt.getSeconds())}`
+  };
+}
+
+// Muta filas con CENTRO='2020' aplicando el shift a fechas/horas
+function applyMexicoShift(rows) {
+  if (!Array.isArray(rows)) return rows;
+  rows.forEach(r => {
+    if (String(r.CENTRO) !== '2020') return;
+    const s1 = shiftEuToMx(r.INICIO_DIA || r.FECHA, r.INICIO_HORA);
+    const s2 = shiftEuToMx(r.FIN_DIA    || r.FECHA, r.FIN_HORA);
+    const sf = shiftEuToMx(r.FECHA,                  r.INICIO_HORA);
+    r.FECHA       = sf.fecha;
+    r.INICIO_DIA  = s1.fecha;
+    r.INICIO_HORA = s1.hora;
+    r.FIN_DIA     = s2.fecha;
+    r.FIN_HORA    = s2.hora;
+    r._mxShifted  = true;
+  });
+  return rows;
+}
+
+function qs() {
+  const p = new URLSearchParams();
+  const m = id => Array.from(document.getElementById(id).selectedOptions).map(o=>o.value).filter(Boolean).join(',');
+  const v = id => document.getElementById(id).value.trim();
+  if (m('fCentro'))  p.set('centro',  m('fCentro'));
+  if (m('fSeccion')) p.set('seccion', m('fSeccion'));
+  if (m('fPuesto'))  p.set('puesto',  m('fPuesto'));
+  if (m('fTurno'))   p.set('turno',   m('fTurno'));
+  if (m('fMes'))     p.set('mes',     m('fMes'));
+  if (m('fSemana'))  p.set('semana',  m('fSemana'));
+  if (v('fDesde'))   p.set('desde',   v('fDesde'));
+  if (v('fHasta'))   p.set('hasta',   v('fHasta'));
+  if (v('fMat'))     p.set('material',v('fMat'));
+  if (v('fOper'))    p.set('operario',v('fOper'));
+  if (v('fOf'))      p.set('of',      v('fOf'));
+  if (v('fLimit'))   p.set('limit',   v('fLimit'));
+  return p.toString();
+}
+
+function clearFilters() {
+  document.querySelectorAll('.filters select').forEach(s => Array.from(s.options).forEach(o => o.selected=false));
+  document.querySelectorAll('.filters input').forEach(i => i.value='');
+  load();
+}
+
+async function loadFilters() {
+  try {
+    const r = await fetch(API + '/preparaciones/filtros').then(r=>r.json());
+    if (r.status !== 'ok') throw new Error(r.message);
+    const fill = (id, arr) => {
+      const el = document.getElementById(id);
+      el.innerHTML = '';
+      arr.forEach(v => el.add(new Option(v, v)));
+      el.size = Math.min(Math.max(arr.length,3), 6);
+    };
+    fill('fCentro',  r.data.CENTRO  || []);
+    fill('fSeccion', r.data.SECCION || []);
+    fill('fPuesto',  r.data.PUESTO  || []);
+    fill('fTurno',   r.data.TURNO   || []);
+    fill('fMes',     r.data.MES     || []);
+    fill('fSemana',  r.data.SEMANA  || []);
+  } catch (e) {
+    setStatus('Error cargando filtros: ' + e.message, true);
+  }
+}
+
+function setStatus(msg, err=false) {
+  $('#statusTxt').textContent = msg;
+  $('#status').className = 'status' + (err?' err':'');
+}
+
+function renderKpis(k) {
+  const efKlass = k.eficiencia_pct >= 100 ? 'good' : k.eficiencia_pct >= 80 ? 'warn' : 'bad';
+  const desvKlass = k.desviacion_media <= 0 ? 'good' : 'bad';
+  $('#kpis').innerHTML = `
+    <div class="kpi"><div class="label">Registros</div><div class="value">${fmtInt(k.registros)}</div></div>
+    <div class="kpi ${efKlass}"><div class="label">Eficiencia global</div><div class="value">${fmt(k.eficiencia_pct)}%</div><div class="sub">std ${fmt(k.prep_std_total,0)} / real ${fmt(k.prep_real_total,0)} min</div></div>
+    <div class="kpi ${desvKlass}"><div class="label">Desviación media</div><div class="value">${k.desviacion_media>=0?'+':''}${fmt(k.desviacion_media)}</div><div class="sub">min · por preparación</div></div>
+    <div class="kpi"><div class="label">Tiempo std total (min)</div><div class="value">${fmt(k.prep_std_total,0)}</div><div class="sub">${fmt(k.prep_std_total/60,1)} h</div></div>
+    <div class="kpi"><div class="label">Tiempo real total (min)</div><div class="value">${fmt(k.prep_real_total,0)}</div><div class="sub">${fmt(k.prep_real_total/60,1)} h</div></div>
+    <div class="kpi good"><div class="label">≤ Estándar</div><div class="value">${fmtInt(k.bajo_std)}</div><div class="sub">${fmt(k.bajo_std_pct,0)}%</div></div>
+    <div class="kpi bad"><div class="label">&gt; Estándar</div><div class="value">${fmtInt(k.sobre_std)}</div></div>
+  `;
+}
+
+function renderAgrupado(rows, by) {
+  lastAgrup = rows;
+  const byCols = by.split(',');
+  const cols = [
+    ...byCols.map(c=>({k:c, label:c, type:'text'})),
+    {k:'registros', label:'#', type:'int'},
+    {k:'prep_std_avg',  label:'STD med (min)',  type:'num'},
+    {k:'prep_real_avg', label:'REAL med (min)', type:'num'},
+    {k:'prep_std_total',  label:'STD tot (min)',  type:'num'},
+    {k:'prep_real_total', label:'REAL tot (min)', type:'num'},
+    {k:'eficiencia_pct', label:'Eficiencia %', type:'pct'},
+    {k:'desviacion_media', label:'Desv. media (min)', type:'num'},
+    {k:'bajo_std', label:'≤ std', type:'int'},
+    {k:'sobre_std', label:'> std', type:'int'},
+    {k:'bajo_std_pct', label:'% ≤ std', type:'pct'}
+  ];
+  const st = sortState.agrup;
+  rows.sort((a,b)=>{
+    const va=a[st.col], vb=b[st.col];
+    if (va==null) return 1; if (vb==null) return -1;
+    return (va>vb?1:va<vb?-1:0) * st.dir;
+  });
+  const t = $('#tblAgrup');
+  t.innerHTML = `<thead><tr>${cols.map(c=>`<th data-k="${c.k}">${c.label}${st.col===c.k?` <span class="arrow">${st.dir<0?'▼':'▲'}</span>`:''}</th>`).join('')}</tr></thead>
+  <tbody>${rows.length===0?`<tr><td colspan="${cols.length}" class="empty">Sin datos</td></tr>`:
+    rows.map(r=>`<tr>${cols.map(c=>{
+      const v = r[c.k];
+      if (c.type==='int')  return `<td class="num">${fmtInt(v)}</td>`;
+      if (c.type==='num')  return `<td class="num">${fmt(v)}</td>`;
+      if (c.type==='pct')  return `<td class="num ${pctClass(v)}">${v==null?'-':fmt(v,1)+'%'}</td>`;
+      return `<td>${v==null?'':v}</td>`;
+    }).join('')}</tr>`).join('')}
+  </tbody>`;
+  t.querySelectorAll('thead th').forEach(th=>th.addEventListener('click',()=>{
+    const k = th.dataset.k;
+    if (sortState.agrup.col===k) sortState.agrup.dir *= -1; else { sortState.agrup.col=k; sortState.agrup.dir=-1; }
+    renderAgrupado(lastAgrup, by);
+  }));
+  $('#info-agrup').textContent = `${rows.length} grupos · agrupado por: ${byCols.join(' × ')}`;
+}
+
+function renderDetalle(rows) {
+  lastDetalle = rows;
+  const cols = [
+    {k:'FECHA',label:'Fecha'}, {k:'CENTRO',label:'Centro'}, {k:'SECCION',label:'Sec'}, {k:'PUESTO',label:'Puesto'},
+    {k:'TURNO',label:'Turno'}, {k:'SEMANA',label:'Sem'},
+    {k:'MATERIAL',label:'Material'}, {k:'OF_NUM',label:'OF'}, {k:'OPERACIONOF',label:'Op'}, {k:'OPERACIONDESCOF',label:'Op desc'},
+    {k:'OPERARIO',label:'Operario'}, {k:'NOMBRE',label:'Nombre'},
+    {k:'INICIO_HORA',label:'Inicio'}, {k:'FIN_HORA',label:'Fin'},
+    {k:'prep_std',label:'STD (min)',type:'num'}, {k:'prep_real',label:'REAL (min)',type:'num'},
+    {k:'_efic',label:'Efic %',type:'pct'}, {k:'_desv',label:'Desv. (min)',type:'num'}
+  ];
+  rows.forEach(r=>{
+    const s = Number(r.prep_std)||0, re = Number(r.prep_real)||0;
+    r._efic = re>0 ? (s/re)*100 : null;
+    r._desv = re - s;
+  });
+  const st = sortState.det;
+  rows.sort((a,b)=>{
+    const va=a[st.col], vb=b[st.col];
+    if (va==null) return 1; if (vb==null) return -1;
+    return (va>vb?1:va<vb?-1:0) * st.dir;
+  });
+  const t = $('#tblDet');
+  t.innerHTML = `<thead><tr>${cols.map(c=>`<th data-k="${c.k}">${c.label}${st.col===c.k?` <span class="arrow">${st.dir<0?'▼':'▲'}</span>`:''}</th>`).join('')}</tr></thead>
+  <tbody>${rows.length===0?`<tr><td colspan="${cols.length}" class="empty">Sin datos</td></tr>`:
+    rows.map(r=>`<tr${r._mxShifted?' title="Hora local de Silao (Guanajuato, MX, UTC-6) — convertida desde hora de servidor en Europa"':''}>${cols.map(c=>{
+      const v=r[c.k];
+      if (c.type==='num') return `<td class="num">${fmt(v)}</td>`;
+      if (c.type==='pct') return `<td class="num ${pctClass(v)}">${v==null?'-':fmt(v,1)+'%'}</td>`;
+      if (c.k==='CENTRO' && r._mxShifted) return `<td>${v==null?'':v} <span style="font-size:10px;opacity:.7" title="Hora local Silao (MX)">🇲🇽</span></td>`;
+      return `<td>${v==null?'':v}</td>`;
+    }).join('')}</tr>`).join('')}
+  </tbody>`;
+  t.querySelectorAll('thead th').forEach(th=>th.addEventListener('click',()=>{
+    const k = th.dataset.k;
+    if (sortState.det.col===k) sortState.det.dir *= -1; else { sortState.det.col=k; sortState.det.dir=-1; }
+    renderDetalle(lastDetalle);
+  }));
+  const mxN = rows.filter(r=>r._mxShifted).length;
+  $('#info-det').textContent = `${rows.length} registros${mxN?` · ${mxN} con hora ajustada a Silao MX 🇲🇽`:''}`;
+}
+
+async function load() {
+  setStatus('Cargando...');
+  const q = qs();
+  try {
+    const [det, agr] = await Promise.all([
+      fetch(`${API}/preparaciones?${q}`).then(r=>r.json()),
+      fetch(`${API}/preparaciones/agrupado?by=${encodeURIComponent(currentBy)}&${q}`).then(r=>r.json())
+    ]);
+    if (det.status !== 'ok') throw new Error(det.message);
+    if (agr.status !== 'ok') throw new Error(agr.message);
+    applyMexicoShift(det.data); // Centro 2020 (Silao MX) → hora local
+    renderKpis(det.kpis);
+    renderDetalle(det.data);
+    renderAgrupado(agr.data, currentBy);
+    const mxCount = det.data.filter(r => r._mxShifted).length;
+    setStatus(`OK · ${det.count} registros · ${det.ms}ms${mxCount ? ` · ${mxCount} en hora MX (Silao)` : ''}`);
+  } catch (e) {
+    setStatus('Error: ' + e.message, true);
+  }
+}
+
+document.querySelectorAll('.tabs .tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tabs .tab').forEach(x=>x.classList.toggle('active', x===t));
+  const id = t.dataset.tab;
+  $('#panel-agrupado').style.display = id==='agrupado'?'':'none';
+  $('#panel-detalle').style.display  = id==='detalle' ?'':'none';
+}));
+
+document.querySelectorAll('#groupBy .chip').forEach(c=>c.addEventListener('click',()=>{
+  document.querySelectorAll('#groupBy .chip').forEach(x=>x.classList.toggle('active', x===c));
+  currentBy = c.dataset.by;
+  load();
+}));
+
+(async ()=>{
+  setStatus('Cargando filtros...');
+  await loadFilters();
+  await load();
+})();
+</script>
+
+</body>
+</html>
