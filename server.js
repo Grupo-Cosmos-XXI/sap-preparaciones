@@ -21,7 +21,7 @@ app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
 
-// ── Middleware: extraer token y validar ──────────────────────────
+// ── Middleware: extraer y validar token del portal ───────────────
 const extractToken = (req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '') ||
                 req.query.token ||
@@ -29,18 +29,26 @@ const extractToken = (req, res, next) => {
                 req.body?.token ||
                 req.cookies?.reportToken;
 
-  if (!token) {
-    req.user = { reports: [REPORT_SLUG] };
-    return next();
-  }
+  req.user = null;
+
+  if (!token) return next();
 
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
-    if (!Array.isArray(req.user.reports)) req.user.reports = [REPORT_SLUG];
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.app && decoded.app !== REPORT_SLUG) {
+      console.warn(`[Auth] Token for app '${decoded.app}' rejected`);
+    } else {
+      req.user = decoded;
+      console.log('[JWT Valid] user:', decoded.email);
+    }
   } catch (err) {
-    console.warn('[Token validation failed]', err.message);
-    req.user = { reports: [REPORT_SLUG] };
+    console.warn('[Token invalid]', err.message);
   }
+  next();
+};
+
+const requireAuth = (req, res, next) => {
+  if (!req.user) return res.status(401).json({ error: 'Autenticación requerida' });
   next();
 };
 
@@ -111,7 +119,7 @@ app.get('/api/test', async (req, res) => {
 
 // ── ENDPOINT: Datos de preparaciones ─────────────────────────────
 // GET /api/preparaciones?centro=&desde=&hasta=&limit=20000
-app.get('/api/preparaciones', async (req, res) => {
+app.get('/api/preparaciones', requireAuth, async (req, res) => {
   try {
     const p = await getPool();
     const tabla = config.tabla_notificaciones;
@@ -191,7 +199,7 @@ app.get('/api/preparaciones', async (req, res) => {
 });
 
 // ── ENDPOINT: Filtros para combos ────────────────────────────────
-app.get('/api/preparaciones/filtros', async (req, res) => {
+app.get('/api/preparaciones/filtros', requireAuth, async (req, res) => {
   try {
     const p = await getPool();
     const tabla = config.tabla_notificaciones;
